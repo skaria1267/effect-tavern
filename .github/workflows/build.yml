@@ -1,0 +1,62 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        run: |
+          npm i -g pnpm@12.11.1
+          pnpm install --frozen-lockfile
+
+      - name: Build client
+        working-directory: packages/client
+        run: pnpm exec vp build
+
+      - name: Compile binary (listens on 127.0.0.1 only)
+        working-directory: packages/server
+        run: |
+          cat > src/vps.ts <<'TS'
+          import { createServer } from "node:http"
+          import { fileURLToPath } from "node:url"
+          import { handler } from "./dev.ts"
+          import { app } from "./serve.ts"
+          const port = Number(process.env["PORT"] ?? 7777)
+          const host = process.env["HOST"] ?? "127.0.0.1"
+          const dist = fileURLToPath(
+            new URL(import.meta.url.includes("$bunfs") ? "dist/" : "../../client/dist/", import.meta.url),
+          )
+          createServer(app(handler, dist)).listen(port, host, () => console.log(`http://${host}:${port}`))
+          TS
+          bun build --compile --target=bun-linux-x64-baseline src/vps.ts \
+            --asset ../client/dist --asset ../runtime/test/cards \
+            --outfile dist/tavern-linux-x64
+          rm -f .*.bun-build
+          ls -lh dist
+
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest packages/server/dist/tavern-linux-x64 \
+            --title "latest" \
+            --notes "Built from ${GITHUB_SHA}"
